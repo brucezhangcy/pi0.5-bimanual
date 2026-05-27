@@ -1,0 +1,62 @@
+diff --git a/examples/trossen_ai/main.py b/examples/trossen_ai/main.py
+index 3e5764f..d406661 100644
+--- a/examples/trossen_ai/main.py
++++ b/examples/trossen_ai/main.py
+@@ -61,17 +61,16 @@ class TrossenOpenPIBridge:
+             min_time_to_move_multiplier=4.0,
+             loop_rate=30,
+             cameras={
++                # This box (coldbrew): cam_high = overhead D455 on the mast,
++                # cam_low = lower D455 near the base. Confirmed by viewpoint 2026-05-27.
++                # Wrist cams intentionally omitted: pi05_bimanual_flip_5_objects was
++                # trained without them (image_mask=False server-side), so opening them
++                # would add failure points without affecting inference.
+                 "cam_high": RealSenseCameraConfig(
+-                    serial_number_or_name="218622270304", width=640, height=480, fps=30, use_depth=False
++                    serial_number_or_name="338122302972", width=640, height=480, fps=30, use_depth=False
+                 ),
+                 "cam_low": RealSenseCameraConfig(
+-                    serial_number_or_name="130322272628", width=640, height=480, fps=30, use_depth=False
+-                ),
+-                "cam_right_wrist": RealSenseCameraConfig(
+-                    serial_number_or_name="128422271347", width=640, height=480, fps=30, use_depth=False
+-                ),
+-                "cam_left_wrist": RealSenseCameraConfig(
+-                    serial_number_or_name="218622274938", width=640, height=480, fps=30, use_depth=False
++                    serial_number_or_name="333422304645", width=640, height=480, fps=30, use_depth=False
+                 ),
+             },
+         )
+@@ -259,6 +258,14 @@ if __name__ == "__main__":
+         max_steps=args.max_steps,
+     )
+ 
+-    bridge.autonomous_mode(task_prompt=args.task_prompt)
+-
+-    bridge.cleanup()
++    try:
++        bridge.autonomous_mode(task_prompt=args.task_prompt)
++    except KeyboardInterrupt:
++        logger.info("Ctrl+C: stopping policy loop, returning arms to rest pose...")
++    finally:
++        # cleanup() -> robot.disconnect() smoothly drives BOTH arms to the staged
++        # positions (2s) then the sleep/zero pose (2s), then releases. Running it in
++        # `finally` means Ctrl+C and crashes also return the arms to rest, not just a
++        # normal finish. NOTE: this rest move is itself motion -- for a real emergency
++        # (collision imminent) use the physical e-stop, not Ctrl+C.
++        bridge.cleanup()
+diff --git a/examples/trossen_ai/pyproject.toml b/examples/trossen_ai/pyproject.toml
+index 0fa914b..2c08fcf 100644
+--- a/examples/trossen_ai/pyproject.toml
++++ b/examples/trossen_ai/pyproject.toml
+@@ -12,6 +12,10 @@ dependencies = [
+     "openpi-client",
+     "lerobot_trossen",
+     "scipy>=1.10.1",
++    # Pin driver to match this arm's controller firmware (v1.10.0). lerobot_trossen
++    # only requires >=1.9.0 and the lock otherwise resolves to 1.9.0, which fails
++    # connect() with a major/minor firmware-mismatch error.
++    "trossen-arm==1.10.0",
+ ]
+ 
+ [tool.uv]
