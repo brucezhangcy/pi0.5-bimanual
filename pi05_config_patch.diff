@@ -1,0 +1,50 @@
+diff --git a/src/openpi/training/config.py b/src/openpi/training/config.py
+index bd05e29..1e801cc 100644
+--- a/src/openpi/training/config.py
++++ b/src/openpi/training/config.py
+@@ -845,6 +845,45 @@ _CONFIGS = [
+         # Turn off EMA for LoRA finetuning.
+         ema_decay=None,
+     ),
++    # Bruce: pi0.5 LoRA finetune on the local bimanual_flip_5_objects dataset.
++    # Dataset has only two cameras (cam_high, cam_low); the wrist cams are
++    # automatically masked off by AlohaInputs since they are absent from repack.
++    TrainConfig(
++        name="pi05_bimanual_flip_5_objects",
++        model=pi0_config.Pi0Config(pi05=True),
++        data=LeRobotAlohaDataConfig(
++            use_delta_joint_actions=False,
++            adapt_to_pi=False,
++            repo_id="bruce/bimanual_flip_5_objects",
++            base_config=DataConfig(prompt_from_task=True),
++            assets=AssetsConfig(
++                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
++                asset_id="trossen",
++            ),
++            repack_transforms=_transforms.Group(
++                inputs=[
++                    _transforms.RepackTransform(
++                        {
++                            "images": {
++                                "cam_high": "observation.images.cam_high",
++                                "cam_low": "observation.images.cam_low",
++                            },
++                            "state": "observation.state",
++                            "actions": "action",
++                            "prompt": "prompt",
++                        }
++                    )
++                ]
++            ),
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
++        num_train_steps=30_000,
++        batch_size=4,
++        freeze_filter=pi0_config.Pi0Config(
++            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
++        ).get_freeze_filter(),
++        ema_decay=None,
++    ),
+     # This is an example of a short horizon task finetuned from pi0 base model using LoRA.
+     TrainConfig(
+         name="pi0_trossen_transfer_block",
