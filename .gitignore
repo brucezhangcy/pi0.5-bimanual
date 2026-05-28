@@ -1,0 +1,6 @@
+openpi/
+openpi_checkpoints/
+artifacts/
+datasets/
+__pycache__/
+*.pyc

@@ -249,6 +249,18 @@ Two things live in two different places:
 - **GitHub** (`brucezhangcy/pi0.5-bimanual`, private): this dev_log + the openpi config patch. Small text files. Will also hold future task variants (rotation, etc.).
 - **Hugging Face** (`BruceZhang0912/pi05-bimanual-flip-5-objects`, private): the 5.8 GB trained checkpoint.
 
+**Layout on the eval desktop.** Everything is consolidated under the cloned instructions repo so there's a single self-contained project folder (this is how the eval box is actually set up — `coldbrew`, RTX 4090):
+
+```
+$HOME/pi0.5-bimanual/                       # the GitHub instructions repo (this dir)
+├── dev_log.md  pi05_config_patch.diff  README.md
+├── openpi/                                 # TrossenRobotics/openpi clone (gitignored)
+└── openpi_checkpoints/                     # HF checkpoint download (gitignored)
+    └── pi05_bimanual_flip_5_objects/pi05_bimanual_flip_5_objects_v1/29999/
+```
+
+`openpi/` and `openpi_checkpoints/` are listed in `.gitignore` so they never get committed back into the instructions repo. The dataset is **not** required on the eval box (eval runs from the checkpoint + base Trossen norm stats); it lives only on the training box.
+
 Six steps, in order:
 
 **Step 1 — Clone the instructions repo from GitHub** (gives you this dev_log + the config patch).
@@ -259,10 +271,10 @@ cd pi0.5-bimanual
 ls   # dev_log.md  pi05_config_patch.diff  README.md
 ```
 
-**Step 2 — Clone openpi.**
+**Step 2 — Clone openpi** (into the instructions repo so everything stays under one folder).
 
 ```bash
-cd ..
+# from inside $HOME/pi0.5-bimanual (where Step 1 left you)
 git clone --recurse-submodules https://github.com/TrossenRobotics/openpi.git
 cd openpi
 git checkout trossen-ai          # same branch we trained on
@@ -274,23 +286,25 @@ GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
 **Step 3 — Apply the config patch** (without this, `serve_policy.py` doesn't know how to wrap the weights).
 
 ```bash
-# still in the openpi/ directory
-git apply ../pi0.5-bimanual/pi05_config_patch.diff
+# still in $HOME/pi0.5-bimanual/openpi (the patch is one level up)
+git apply ../pi05_config_patch.diff
 grep -n "pi05_bimanual_flip_5_objects" src/openpi/training/config.py    # confirm the block is in
 ```
 
 **Step 4 — Pull the checkpoint from HF** (~5.8 GB).
 
 ```bash
+# huggingface-cli ships in openpi's uv env; run it from $HOME/pi0.5-bimanual/openpi
 HF_TOKEN=<your HF read token> \
-    huggingface-cli download BruceZhang0912/pi05-bimanual-flip-5-objects \
-        --local-dir $HOME/openpi_checkpoints/pi05_bimanual_flip_5_objects/pi05_bimanual_flip_5_objects_v1 \
-        --local-dir-use-symlinks False
+    uv run huggingface-cli download BruceZhang0912/pi05-bimanual-flip-5-objects \
+        --local-dir $HOME/pi0.5-bimanual/openpi_checkpoints/pi05_bimanual_flip_5_objects/pi05_bimanual_flip_5_objects_v1
 ```
+
+(The `--local-dir-use-symlinks` flag was removed in current `huggingface_hub` — omit it; the CLI already copies real files into `--local-dir`.)
 
 After this the directory should look like:
 ```
-$HOME/openpi_checkpoints/pi05_bimanual_flip_5_objects/pi05_bimanual_flip_5_objects_v1/29999/
+$HOME/pi0.5-bimanual/openpi_checkpoints/pi05_bimanual_flip_5_objects/pi05_bimanual_flip_5_objects_v1/29999/
     ├── params/
     ├── assets/trossen/
     └── _CHECKPOINT_METADATA
@@ -299,11 +313,11 @@ $HOME/openpi_checkpoints/pi05_bimanual_flip_5_objects/pi05_bimanual_flip_5_objec
 **Step 5 — Start the policy server.**
 
 ```bash
-cd openpi
+cd $HOME/pi0.5-bimanual/openpi
 uv run scripts/serve_policy.py \
     policy:checkpoint \
     --policy.config=pi05_bimanual_flip_5_objects \
-    --policy.dir=$HOME/openpi_checkpoints/pi05_bimanual_flip_5_objects/pi05_bimanual_flip_5_objects_v1/29999
+    --policy.dir=$HOME/pi0.5-bimanual/openpi_checkpoints/pi05_bimanual_flip_5_objects/pi05_bimanual_flip_5_objects_v1/29999
 ```
 
 Defaults to a websocket server on port 8000. First inference call JIT-compiles for 1–2 min — fire a dummy request before letting the robot move.
@@ -320,8 +334,8 @@ Follow the **Real-Robot Evaluation** section of https://docs.trossenrobotics.com
 
 ### 5.C Sanity checks before touching the robot
 
-1. **Dry run** — call the server with a dummy observation built from a recorded episode and confirm the action output has shape `[H, 14]` with reasonable joint magnitudes.
-2. **Replay overlay** — feed the first frame of a training episode and see whether the predicted action chunk roughly matches the recorded action. Wildly off → camera mapping or joint ordering is wrong.
+1. **Dry run — ✅ DONE on `coldbrew` 2026-05-26.** Sent a dummy observation (zero 14-dim state + random `cam_high`/`cam_low` images @224 CHW + `prompt="Bimanual Flip"`) through the websocket client. Output action chunk is `(50, 14)` with joint magnitudes in a sane radian range (global abs max ≈ 0.65, no NaNs/blowups). Confirms repack → norm-stats → pi0.5 → action-decode works end-to-end. Values aren't behaviorally meaningful (random images) — that's what #2 is for. Script: `/tmp/dryrun_infer.py`.
+2. **Replay overlay** — feed the first frame of a real training episode and see whether the predicted action chunk roughly matches the recorded action. Wildly off → camera mapping or joint ordering is wrong. **Needs the dataset**, which is not on the eval box; copy a few episodes from the training box (`/data/bruce/pi0.5/bimanual_flip_5_objects`) under `$HOME/pi0.5-bimanual/datasets/` to run this.
 3. **Slow first physical run** — clamp action rate / scale to ~50 % until you see the policy execute one full flip without surprises. Then ramp up.
 
 ## 6. Gotchas observed
@@ -344,3 +358,50 @@ Follow the **Real-Robot Evaluation** section of https://docs.trossenrobotics.com
 | HF repo (private, weights) | https://huggingface.co/BruceZhang0912/pi05-bimanual-flip-5-objects |
 | GitHub repo (private, instructions + patch) | https://github.com/brucezhangcy/pi0.5-bimanual |
 | Dataset symlink | `~/.cache/huggingface/lerobot/bruce/bimanual_flip_5_objects` → `/data/bruce/pi0.5/bimanual_flip_5_objects` |
+
+## 8. Eval-desktop session — `coldbrew` (RTX 4090), 2026-05-27
+
+Brought the trained checkpoint up on the eval desktop wired to the real Trossen arms and ran the first real-robot eval. **Outcome: the policy did not succeed at the flip task (see 8.6).**
+
+### 8.1 Setup (done)
+- Cloned `TrossenRobotics/openpi` (branch `trossen-ai`), `uv sync` + `uv pip install -e .`, applied `pi05_config_patch.diff`. Pulled the 5.8 GB checkpoint from HF into `29999/`.
+- **Consolidated layout**: everything lives under `$HOME/pi0.5-bimanual/` — the instructions repo, plus `openpi/` and `openpi_checkpoints/` (both gitignored). Moving `openpi/` breaks its uv venv (absolute paths) → re-ran `uv sync` after the move. §4.B commands updated to these paths.
+- Policy server: `serve_policy.py policy:checkpoint --policy.config=pi05_bimanual_flip_5_objects` on `:8000`. Dry-run (§4.C #1) passed: `(50,14)`, sane magnitudes.
+
+### 8.2 Camera mapping
+- This rig has 2× RealSense **D455** scene cams + 4× **D405** (wrist, unused). `cam_high=338122302972`, `cam_low=333422304645`.
+- **Caveat:** both D455s are at the **same physical height** — the high/low assignment was confirmed only by *viewpoint appearance*, NOT by matching against a real training frame. `cam_high`/`cam_low` are dataset *channel names*, not heights; a swap feeds the policy OOD images. This is unverified ground-truth and a prime suspect for 8.6. See `eval_tools/replay_overlay.py`.
+
+### 8.3 Driver/firmware fix (gotcha)
+- `main.py`'s arm `connect()` failed: **driver v1.9.0 vs controller firmware v1.10.0** ("major and minor versions must match"). The client env resolved `trossen-arm==1.9.0` (lerobot_trossen only pins `>=1.9.0`), and `uv run` auto-syncs so a manual `uv pip install` got reverted. **Fix: pinned `trossen-arm==1.10.0` in `examples/trossen_ai/pyproject.toml`.**
+
+### 8.4 Client edits (preserved as `trossen_ai_client_patch.diff`)
+The `openpi/` tree is gitignored, so client edits are saved as a patch in this repo:
+- Set the two camera serials, dropped the wrist-cam entries.
+- Pinned `trossen-arm==1.10.0`.
+- Wrapped the run loop in `try/finally` so **Ctrl+C also returns the arms to rest** (`cleanup()`→`disconnect()` drives both arms to staged then sleep/zero, ~4 s/arm).
+
+### 8.5 Test mode (`--mode test`) — passed
+Full real pipeline verified: both arms connected (driver==firmware==1.10.0), both cameras connected, policy queried → `(50,14)`, logged would-be actions are smooth and within joint ranges. **Note:** test mode does NOT execute the per-step actions, but `disconnect()` on exit DOES move both arms to the rest pose (~4 s/arm) — i.e. test mode is not entirely motion-free at shutdown.
+
+### 8.6 Real eval (`--mode autonomous`) — NO SUCCESS
+Ran the policy on the live arms. **It did not complete the bimanual flip.** (Detailed failure behavior not yet logged here — TODO: fill in what the arms actually did: reached wrong spot / failed to grasp / erratic / froze, etc.)
+
+Leading hypotheses, roughly in priority order:
+1. **Camera mapping unverified against training data** (8.2) — top suspect. Run `eval_tools/replay_overlay.py` on a real episode: if predicted≈recorded actions, mapping+pipeline are right; if all dims are off with cameras looking fine, cam_high/cam_low are likely swapped.
+2. **Scene/distribution mismatch** — pi0.5 here is a narrow LoRA finetune (100 eps, 1 task, controlled scene). Object choice, positions, lighting, and camera *poses* must closely match data collection. "Same setup" was asserted but not validated against training frames.
+3. **No success/termination logic** — the client runs a fixed `--max_steps` (default 1000 ≈ 33 s @ 30 Hz) with no task-success detection; it keeps acting regardless. Not a failure cause, but shapes what "no success" looks like.
+
+**Recommended next step:** copy a few episodes from the training box and run the **Tier-1 replay overlay** before the next hardware attempt — it disambiguates camera-mapping vs. policy-quality without risking the arms.
+
+### 8.7 Safety tooling added (`eval_tools/`)
+Safety ladder + scripts (see `eval_tools/README.md`): `capture_action_chunk.py`, `sim_playback.py` (Tier-2 MuJoCo limit/velocity check + mp4, runs in the `trossen_sim` conda env), `replay_overlay.py` (Tier-1, needs dataset), `make_demo_trajectory.py`. Physical e-stop for this rig is **not** a documented dedicated button — confirm the bench's power-kill/e-stop; comm-loss and collision auto-idle are the documented software safeties.
+
+### 8.8 New artifacts
+| Artifact | Location |
+|---|---|
+| Eval-desktop openpi clone (gitignored) | `$HOME/pi0.5-bimanual/openpi/` (branch `trossen-ai` + patches) |
+| Checkpoint (gitignored) | `$HOME/pi0.5-bimanual/openpi_checkpoints/pi05_bimanual_flip_5_objects/pi05_bimanual_flip_5_objects_v1/29999/` |
+| Client edits patch | `trossen_ai_client_patch.diff` (apply in `openpi/`) |
+| Safety/eval tooling | `eval_tools/` |
+| Test-mode log | `/tmp/client_test.log` |
