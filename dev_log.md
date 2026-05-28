@@ -1,29 +1,50 @@
-# Dev log — pi0.5 fine-tune on bimanual_flip_5_objects
+# Dev log — pi0.5 fine-tunes on bimanual flip datasets
 
-Date: 2026-05-26
-Author: brucezha@usc.edu
+Author: brucezha@usc.edu (also collected all training data)
 Machine used for training: yunshuang's box (GPU 3, RTX 6000 Ada 48 GB)
 
 ## 1. Goal
 
-Fine-tune the pi0.5 base policy on the local `bimanual_flip_5_objects` LeRobot dataset (100 episodes, 44 883 frames, 2 cameras, Trossen stationary platform, 14-dim bimanual joints) so it can be evaluated on the real Trossen arms.
+Fine-tune the pi0.5 base policy on Trossen `trossen_ai_stationary` bimanual flip
+data so it can be evaluated on the real Trossen arms.
+
+Two datasets covered so far (both collected by Bruce, 14-dim bimanual joints,
+30 fps, task `"Bimanual Flip"`):
+
+| run | dataset | episodes | frames | cameras | finetuned on |
+|---|---|---|---|---|---|
+| v1 (2026-05-26) | local `bimanual_flip_5_objects` | 100 | 44 883 | 2 (cam_high, cam_low) | pi05_base + LoRA |
+| v2 (2026-05-28) | HF `BruceZhang0912/Bimanual-Flip-4-Camera` | 101 | 30 199 | 4 (top, bottom, left_wrist, right_wrist) | pi05_base + LoRA |
 
 Reference tutorial: https://docs.trossenrobotics.com/trossen_arm/v1.8/tutorials/openpi.html
 
-## 2. Dataset summary
+## 2. Datasets
 
-Path: `/data/bruce/pi0.5/bimanual_flip_5_objects`
+Both datasets are LeRobot v2.1, `trossen_subversion v1.0`, `robot_type=trossen_ai_stationary`, 30 fps, single task `"Bimanual Flip"`, 14-dim bimanual joints (`left_joint_0..6, right_joint_0..6`). Both **collected by Bruce**.
 
-- LeRobot v2.1 format, `trossen_subversion v1.0`, `robot_type=trossen_ai_stationary`
-- 100 episodes / 44 883 frames / 30 fps / 1 task
+### 2.1 `bimanual_flip_5_objects` (v1 run)
+
+Local: `/data/bruce/pi0.5/bimanual_flip_5_objects`
+
+- 100 episodes / 44 883 frames
 - Cameras (only two — no wrist cams):
   - `observation.images.cam_high` (480×640, AV1)
   - `observation.images.cam_low`  (480×640, AV1)
-- State / action: 14-dim (`left_joint_0..6`, `right_joint_0..6`)
-- Task string (in `meta/tasks.jsonl`): `"Bimanual Flip"`
 - Depth parquet exists (`observation.depth.cam_*`) but openpi does not consume it — ignored
 
-## 3. What I did this session
+### 2.2 `Bimanual-Flip-4-Camera` (v2 run)
+
+**All 101 episodes of this dataset were collected by Bruce.** Local copy lives at `/data/bruce/pi0.5/Bimanual-Flip-4-Camera` and is mirrored to Hugging Face at `BruceZhang0912/Bimanual-Flip-4-Camera`.
+
+- 101 episodes / 30 199 frames
+- Four cameras (all 480×640, AV1):
+  - `observation.images.top`         → maps to `cam_high`
+  - `observation.images.bottom`      → maps to `cam_low`
+  - `observation.images.left_wrist`  → maps to `cam_left_wrist`
+  - `observation.images.right_wrist` → maps to `cam_right_wrist`
+- All four AlohaInputs camera slots populated — no masking needed (unlike v1)
+
+## 3. Run v1 — `bimanual_flip_5_objects` (2 cameras), 2026-05-26
 
 ### 3.1 Added a new training config
 
@@ -120,13 +141,91 @@ api.upload_folder(
 )
 ```
 
-## 4. What to run, step by step
+## 4. Run v2 — `Bimanual-Flip-4-Camera` (4 cameras), 2026-05-28
 
-Training is done. The remaining work splits cleanly into "this machine" (nothing) and "eval desktop" (six ordered steps).
+### 4.1 Added a parallel training config
 
-### 4.A On THIS machine (`/data/bruce/pi0.5/openpi` on yunshuang's box)
+In [openpi/src/openpi/training/config.py](openpi/src/openpi/training/config.py), block named `pi05_bimanual_flip_4_camera` — placed right before the v1 block. Same base recipe (pi0.5 + LoRA, EMA off, batch_size=4, 30 000 steps, `prompt_from_task=True`, `assets=trossen/pi05_base`) with two differences from v1:
 
-**Nothing further to run.** Checkpoint trained, HF upload done, dev_log + config patch pushed to GitHub.
+- `repo_id="BruceZhang0912/Bimanual-Flip-4-Camera"` (matches the HF dataset id and the local cache symlink)
+- `RepackTransform` maps **all four** cameras — no wrist masking needed:
+  ```python
+  "images": {
+      "cam_high":        "observation.images.top",
+      "cam_low":         "observation.images.bottom",
+      "cam_left_wrist":  "observation.images.left_wrist",
+      "cam_right_wrist": "observation.images.right_wrist",
+  }
+  ```
+
+### 4.2 Made the dataset visible to LeRobotDataset
+
+```bash
+mkdir -p ~/.cache/huggingface/lerobot/BruceZhang0912
+ln -sfn /data/bruce/pi0.5/Bimanual-Flip-4-Camera \
+        ~/.cache/huggingface/lerobot/BruceZhang0912/Bimanual-Flip-4-Camera
+```
+
+### 4.3 Smoke-tested the data pipeline
+
+```bash
+cd /data/bruce/pi0.5/openpi
+JAX_PLATFORMS=cpu uv run scripts/compute_norm_stats.py \
+    --config-name=pi05_bimanual_flip_4_camera
+```
+
+Passed cleanly — wrote local stats to `openpi/assets/pi05_bimanual_flip_4_camera/BruceZhang0912/Bimanual-Flip-4-Camera/norm_stats.json`. As with v1, those local stats are not used at train time (config loads base Trossen stats from `gs://openpi-assets/checkpoints/pi05_base/assets/trossen`); the run is purely a video-decode + transform-chain check.
+
+### 4.4 Launched fine-tune
+
+```bash
+cd /data/bruce/pi0.5/openpi
+CUDA_VISIBLE_DEVICES=3 XLA_PYTHON_CLIENT_MEM_FRACTION=0.85 \
+    uv run scripts/train.py pi05_bimanual_flip_4_camera \
+        --exp-name=pi05_bimanual_flip_4_camera_v1 \
+        --overwrite \
+    > /tmp/pi05_train_4cam.log 2>&1 &
+```
+
+Same GPU as v1 (RTX 6000 Ada, ~35 GB free). Training results landed in `openpi/checkpoints/pi05_bimanual_flip_4_camera/pi05_bimanual_flip_4_camera_v1/`.
+
+**Headline numbers**
+
+- Throughput: ~1.6 it/s (slightly slower than v1's 1.8 it/s due to 2× the image decode work)
+- Wall time: **~5 h** for 30 000 steps (03:21 → ~08:30)
+- Min loss: **0.0049** at step 29 600
+- Last-1k mean loss: **0.0058**
+- Wandb run: https://wandb.ai/yunshuang-university-of-southern-california/openpi/runs/batwgt8j
+- Checkpoints saved at steps 5000 / 10000 / 15000 / 20000 / 25000 / 29999
+
+**Convergence analysis** (300 log lines @ every 100 steps)
+
+| step window | mean loss | mean grad_norm | Δ param_norm |
+|---|---|---|---|
+| 0 – 500 | 0.2009 | 2.03 | +0.0003 |
+| 500 – 2 000 | 0.0419 | 0.48 | +0.058 |
+| 2 000 – 5 000 | 0.0230 | 0.30 | +0.148 |
+| 5 000 – 10 000 | 0.0156 | 0.23 | +0.214 |
+| 10 000 – 15 000 | 0.0114 | 0.19 | +0.134 |
+| 15 000 – 20 000 | 0.0090 | 0.16 | +0.061 |
+| 20 000 – 25 000 | 0.0071 | 0.14 | +0.020 |
+| **25 000 – 30 000** | **0.0061** | **0.13** | **+0.006** |
+
+**Verdict: same convergence pattern as v1, lower absolute loss.** Last-1k vs 20-25k window ratio = 0.81 (identical to v1, meaning training was still ticking down by ~19% over the final 5k steps), but param-norm drift in the last 5k window is only 0.006 (vs 0.21 in steps 5-10k — 35× slowdown) — weights essentially stopped moving. **Min loss 0.0049 vs v1's 0.0082** — 40 % lower, which is the expected payoff from adding the two wrist cameras (better fine-manipulation signal). Ship 29999.
+
+### 4.5 Push the 4-camera checkpoint to Hugging Face (TBD)
+
+Same procedure as v1 — upload `29999/{params,assets,_CHECKPOINT_METADATA}` (~5.8 GB, skip `train_state/` ≈ 2.8 GB) to a new private repo, suggested name `BruceZhang0912/pi05-bimanual-flip-4-camera`. Once pushed, also amend the GitHub repo's `pi05_config_patch.diff` to include both the v1 and v2 TrainConfig blocks.
+
+## 5. What to run, step by step
+
+The steps below were written for **v1** (`pi05_bimanual_flip_5_objects`, 2-camera). Substitute the v2 names where indicated to deploy `pi05_bimanual_flip_4_camera` instead — the recipe is identical, only the config name, exp-name, HF model repo (TBD when v2 finishes and gets uploaded), and dataset id change.
+
+### 5.A On THIS machine (`/data/bruce/pi0.5/openpi` on yunshuang's box)
+
+**v1**: nothing further to run — checkpoint trained, HF upload done, dev_log + config patch pushed to GitHub.
+
+**v2**: training **in progress** at the time of writing (PID 3548308 on GPU 3). Once it finishes, follow the same pattern: upload `29999/{params,assets,_CHECKPOINT_METADATA}` to a new HF model repo (e.g. `BruceZhang0912/pi05-bimanual-flip-4-camera`), and amend the GitHub repo's patch to include the v2 block alongside the v1 block.
 
 Note: the `pi05_bimanual_flip_5_objects` block in `src/openpi/training/config.py` is an **uncommitted local edit** on the `trossen-ai` branch. That's fine — we don't push it back to the TrossenRobotics fork. The diff is preserved as:
 
@@ -143,7 +242,7 @@ CUDA_VISIBLE_DEVICES=3 XLA_PYTHON_CLIENT_MEM_FRACTION=0.85 \
         --overwrite
 ```
 
-### 4.B On the eval desktop (the box wired to the real Trossen arms)
+### 5.B On the eval desktop (the box wired to the real Trossen arms)
 
 Two things live in two different places:
 
@@ -219,7 +318,7 @@ Follow the **Real-Robot Evaluation** section of https://docs.trossenrobotics.com
 - Send `prompt="Bimanual Flip"` (same string as `meta/tasks.jsonl`).
 - Run at ~30 Hz (the dataset fps); execute the returned action chunk and only re-query the policy once per chunk.
 
-### 4.C Sanity checks before touching the robot
+### 5.C Sanity checks before touching the robot
 
 1. **Dry run** — call the server with a dummy observation built from a recorded episode and confirm the action output has shape `[H, 14]` with reasonable joint magnitudes.
 2. **Replay overlay** — feed the first frame of a training episode and see whether the predicted action chunk roughly matches the recorded action. Wildly off → camera mapping or joint ordering is wrong.
