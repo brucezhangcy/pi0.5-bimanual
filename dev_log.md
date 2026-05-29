@@ -494,6 +494,11 @@ Used GPU 0 (40 GB free) instead of GPU 3 — by the time the smoke test passed, 
 
 Rotation finished between v2 and v1 in absolute loss — slightly higher than v2 (consistent with rotation being a harder task than flip on the same hardware setup), still 26-29 % lower than v1.
 
-### 9.5 Push the rotation checkpoint to Hugging Face (TBD)
+### 9.5 Pushed the rotation checkpoint to Hugging Face
 
-Same procedure as v1 / v2 — upload `29999/{params,assets,_CHECKPOINT_METADATA}` (~5.8 GB, skip `train_state/` ≈ 2.8 GB) to a new private repo, suggested name `BruceZhang0912/pi05-bimanual-rotation`. Refresh the GitHub repo's `pi05_config_patch.diff` to include all three blocks.
+Repo: `BruceZhang0912/pi05-bimanual-rotation` (private)
+→ https://huggingface.co/BruceZhang0912/pi05-bimanual-rotation
+
+Uploaded `29999/{params,assets,_CHECKPOINT_METADATA}` (~5.8 GB), `train_state/` excluded. Same `HfApi.upload_folder` recipe as v1 / v2.
+
+GitHub repo's `pi05_config_patch.diff` now contains all three TrainConfig blocks (`pi05_bimanual_flip_5_objects`, `pi05_bimanual_flip_4_camera`, `pi05_bimanual_rotation`).
