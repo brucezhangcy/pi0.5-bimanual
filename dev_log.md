@@ -8,13 +8,13 @@ Machine used for training: yunshuang's box (GPU 3, RTX 6000 Ada 48 GB)
 Fine-tune the pi0.5 base policy on Trossen `trossen_ai_stationary` bimanual flip
 data so it can be evaluated on the real Trossen arms.
 
-Two datasets covered so far (both collected by Bruce, 14-dim bimanual joints,
-30 fps, task `"Bimanual Flip"`):
+Three datasets covered so far (all collected by Bruce, 14-dim bimanual joints, 30 fps):
 
-| run | dataset | episodes | frames | cameras | finetuned on |
-|---|---|---|---|---|---|
-| v1 (2026-05-26) | local `bimanual_flip_5_objects` | 100 | 44 883 | 2 (cam_high, cam_low) | pi05_base + LoRA |
-| v2 (2026-05-28) | HF `BruceZhang0912/Bimanual-Flip-4-Camera` | 101 | 30 199 | 4 (top, bottom, left_wrist, right_wrist) | pi05_base + LoRA |
+| run | dataset | task | episodes | frames | cameras | finetuned on |
+|---|---|---|---|---|---|---|
+| v1 (2026-05-26) | local `bimanual_flip_5_objects` | Bimanual Flip | 100 | 44 883 | 2 (cam_high, cam_low) | pi05_base + LoRA |
+| v2 (2026-05-28) | HF `BruceZhang0912/Bimanual-Flip-4-Camera` | Bimanual Flip | 101 | 30 199 | 4 (top, bottom, left_wrist, right_wrist) | pi05_base + LoRA |
+| v3 (2026-05-28) | HF `BruceZhang0912/Bimanual-Recordings` | Bimanual Rotate | 100 | 29 898 | 4 (same schema as v2) | pi05_base + LoRA |
 
 Reference tutorial: https://docs.trossenrobotics.com/trossen_arm/v1.8/tutorials/openpi.html
 
@@ -43,6 +43,14 @@ Local: `/data/bruce/pi0.5/bimanual_flip_5_objects`
   - `observation.images.left_wrist`  → maps to `cam_left_wrist`
   - `observation.images.right_wrist` → maps to `cam_right_wrist`
 - All four AlohaInputs camera slots populated — no masking needed (unlike v1)
+
+### 2.3 `Bimanual-Recordings` (v3 run, rotation)
+
+**All 100 episodes of this dataset were collected by Bruce.** Local copy lives at `/data/bruce/pi0.5/Bimanual-Recordings`, mirrored to Hugging Face at `BruceZhang0912/Bimanual-Recordings`.
+
+- Task: `"Bimanual Rotate"` (single task in `meta/tasks.jsonl`)
+- 100 episodes / 29 898 frames / 4.3 GB on disk
+- Same 4-camera schema as v2: `observation.images.{top, bottom, left_wrist, right_wrist}` → same AlohaInputs mapping. The TrainConfig is a one-line variant of the v2 block (just `name`, `repo_id` change).
 
 ## 3. Run v1 — `bimanual_flip_5_objects` (2 cameras), 2026-05-26
 
@@ -213,9 +221,14 @@ Same GPU as v1 (RTX 6000 Ada, ~35 GB free). Training results landed in `openpi/c
 
 **Verdict: same convergence pattern as v1, lower absolute loss.** Last-1k vs 20-25k window ratio = 0.81 (identical to v1, meaning training was still ticking down by ~19% over the final 5k steps), but param-norm drift in the last 5k window is only 0.006 (vs 0.21 in steps 5-10k — 35× slowdown) — weights essentially stopped moving. **Min loss 0.0049 vs v1's 0.0082** — 40 % lower, which is the expected payoff from adding the two wrist cameras (better fine-manipulation signal). Ship 29999.
 
-### 4.5 Push the 4-camera checkpoint to Hugging Face (TBD)
+### 4.5 Pushed the 4-camera checkpoint to Hugging Face
 
-Same procedure as v1 — upload `29999/{params,assets,_CHECKPOINT_METADATA}` (~5.8 GB, skip `train_state/` ≈ 2.8 GB) to a new private repo, suggested name `BruceZhang0912/pi05-bimanual-flip-4-camera`. Once pushed, also amend the GitHub repo's `pi05_config_patch.diff` to include both the v1 and v2 TrainConfig blocks.
+Repo: `BruceZhang0912/pi05-bimanual-flip-4-camera` (private)
+→ https://huggingface.co/BruceZhang0912/pi05-bimanual-flip-4-camera
+
+Uploaded `29999/{params,assets,_CHECKPOINT_METADATA}` (~5.8 GB), `train_state/` excluded. Same `HfApi.upload_folder` recipe as v1, just with the new repo id and folder path.
+
+The GitHub repo's `pi05_config_patch.diff` was also refreshed to include both the v1 and v2 TrainConfig blocks in one patch.
 
 ## 5. What to run, step by step
 
@@ -405,3 +418,82 @@ Safety ladder + scripts (see `eval_tools/README.md`): `capture_action_chunk.py`,
 | Client edits patch | `trossen_ai_client_patch.diff` (apply in `openpi/`) |
 | Safety/eval tooling | `eval_tools/` |
 | Test-mode log | `/tmp/client_test.log` |
+
+## 9. Run v3 — `Bimanual-Recordings` (rotation, 4 cameras), 2026-05-28
+
+### 9.1 Added a parallel training config
+
+In [openpi/src/openpi/training/config.py](openpi/src/openpi/training/config.py), block named `pi05_bimanual_rotation` — placed right before the `pi05_bimanual_flip_4_camera` block. Recipe is **identical** to v2 (pi0.5 + LoRA, EMA off, batch_size=4, 30 000 steps, `prompt_from_task=True`, `assets=trossen/pi05_base`); the only differences are:
+
+- `name="pi05_bimanual_rotation"`
+- `repo_id="BruceZhang0912/Bimanual-Recordings"`
+
+The camera repack map is byte-for-byte the same as v2 since the dataset has the same 4-camera schema (`top/bottom/left_wrist/right_wrist`).
+
+### 9.2 Made the dataset visible to LeRobotDataset
+
+```bash
+mkdir -p ~/.cache/huggingface/lerobot/BruceZhang0912
+ln -sfn /data/bruce/pi0.5/Bimanual-Recordings \
+        ~/.cache/huggingface/lerobot/BruceZhang0912/Bimanual-Recordings
+```
+
+### 9.3 Smoke-tested the data pipeline
+
+```bash
+cd /data/bruce/pi0.5/openpi
+JAX_PLATFORMS=cpu uv run scripts/compute_norm_stats.py \
+    --config-name=pi05_bimanual_rotation \
+    > /tmp/norm_stats_rotation.log 2>&1 &
+```
+
+### 9.4 Launched fine-tune
+
+```bash
+cd /data/bruce/pi0.5/openpi
+CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_MEM_FRACTION=0.85 \
+    uv run scripts/train.py pi05_bimanual_rotation \
+        --exp-name=pi05_bimanual_rotation_v1 \
+        --overwrite \
+    > /tmp/pi05_train_rotation.log 2>&1 &
+```
+
+Used GPU 0 (40 GB free) instead of GPU 3 — by the time the smoke test passed, GPU 3 had been claimed by another workload.
+
+**Headline numbers**
+
+- Throughput: **1.4 it/s** on the RTX 6000 Ada (slower than v2's 1.6 it/s, likely the other GPU-0 tenant interfering)
+- Wall time: **~5h 50 min** for 30 000 steps (17:14 → ~23:05)
+- Min loss: **0.0058** at step 29 600
+- Last-1k mean loss: **0.0068**
+- Wandb run: https://wandb.ai/yunshuang-university-of-southern-california/openpi/runs/tkflmjed
+- Checkpoints saved at steps 5000 / 10000 / 15000 / 20000 / 25000 / 29999
+
+**Convergence analysis** (300 log lines @ every 100 steps; lines were stdout-buffered and only flushed on process exit — wandb has the same data in real time)
+
+| step window | mean loss | mean grad_norm | Δ param_norm |
+|---|---|---|---|
+| 0 – 500 | 0.2642 | 2.22 | +0.0003 |
+| 500 – 2 000 | 0.0494 | 0.58 | +0.056 |
+| 2 000 – 5 000 | 0.0281 | 0.37 | +0.150 |
+| 5 000 – 10 000 | 0.0190 | 0.28 | +0.215 |
+| 10 000 – 15 000 | 0.0139 | 0.23 | +0.136 |
+| 15 000 – 20 000 | 0.0107 | 0.19 | +0.062 |
+| 20 000 – 25 000 | 0.0084 | 0.17 | +0.020 |
+| **25 000 – 30 000** | **0.0072** | **0.15** | **+0.006** |
+
+**Verdict: same convergence pattern as v1 and v2.** Last-1k vs 20-25k window ratio = 0.81 — identical to both prior runs, meaning loss was still trending down (~19% in the final 5k steps) while the param-norm drift collapsed from 0.21 (steps 5-10k) to 0.006 (steps 25-30k), the by-now-familiar "approaching plateau" signal. Ship **29999**.
+
+**Cross-run comparison**
+
+| run | task | cams | min loss | last-1k mean | last-5k mean grad |
+|---|---|---|---|---|---|
+| v1 | Flip (5-objects) | 2 | 0.0082 | 0.0094 | 0.18 |
+| v2 | Flip (4-cam) | 4 | 0.0049 | 0.0058 | 0.13 |
+| **v3** | **Rotate** | **4** | **0.0058** | **0.0068** | **0.15** |
+
+Rotation finished between v2 and v1 in absolute loss — slightly higher than v2 (consistent with rotation being a harder task than flip on the same hardware setup), still 26-29 % lower than v1.
+
+### 9.5 Push the rotation checkpoint to Hugging Face (TBD)
+
+Same procedure as v1 / v2 — upload `29999/{params,assets,_CHECKPOINT_METADATA}` (~5.8 GB, skip `train_state/` ≈ 2.8 GB) to a new private repo, suggested name `BruceZhang0912/pi05-bimanual-rotation`. Refresh the GitHub repo's `pi05_config_patch.diff` to include all three blocks.
