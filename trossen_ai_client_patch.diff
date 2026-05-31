@@ -1,33 +1,134 @@
 diff --git a/examples/trossen_ai/main.py b/examples/trossen_ai/main.py
-index 3e5764f..d406661 100644
+index 3e5764f..f2104b6 100644
 --- a/examples/trossen_ai/main.py
 +++ b/examples/trossen_ai/main.py
-@@ -61,17 +61,16 @@ class TrossenOpenPIBridge:
+@@ -33,6 +33,57 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
+ logger = logging.getLogger(__name__)
+ 
+ 
++def _reset_realsense_cameras(settle_s: float = 8.0) -> None:
++    """Hardware-reset all connected RealSense devices and wait for re-enumeration.
++
++    The kernel UVC driver does not immediately release USB iso-bandwidth reservations
++    when a stream ends, so a second run launched soon after a successful one tends
++    to starve one camera on the iso schedule and fail with `async_read` timeouts.
++    hardware_reset() forces each device to renegotiate bandwidth from scratch.
++    Adds ~8 s to startup; tradable for not having to manually reset between runs.
++    """
++    try:
++        import pyrealsense2 as rs
++        import time
++        ctx = rs.context()
++        devs = list(ctx.devices)
++        if not devs:
++            logger.warning("no RealSense devices found to reset")
++            return
++        logger.info(f"resetting {len(devs)} RealSense devices for a clean USB iso schedule...")
++        for d in devs:
++            try:
++                d.hardware_reset()
++            except Exception as e:
++                serial = d.get_info(rs.camera_info.serial_number) if hasattr(d, "get_info") else "?"
++                logger.warning(f"  reset failed for {serial}: {e}")
++        time.sleep(settle_s)
++        n_after = len(list(rs.context().devices))
++        logger.info(f"reset complete; {n_after} devices re-enumerated")
++    except Exception as e:
++        logger.warning(f"RealSense reset skipped (continuing anyway): {e}")
++
++# Hard joint limits for the WidowX AI (from URDF / stationary_ai.xml actuator ctrlrange).
++# Dataset action order: [L_j0..L_j5, L_grip, R_j0..R_j5, R_grip]. Arm joints are radians,
++# gripper is the carriage slide in meters [0, 0.044]. We clamp with a 1-2 mrad / 1 mm
++# margin inside the firmware's hard limits to defend against floating-point overshoot --
++# the firmware rejects ANY out-of-range command (even 0.044022 vs 0.044000) and idles
++# the motor, which then breaks the control loop and disconnect path. See dev_log v3 eval.
++_ARM_LO_HI = [
++    (-3.05433 + 1e-3, 3.05433 - 1e-3),  # j0
++    (0.0     + 1e-3, 3.14159 - 1e-3),  # j1
++    (0.0     + 1e-3, 2.35619 - 1e-3),  # j2
++    (-1.5708 + 1e-3, 1.5708  - 1e-3),  # j3
++    (-1.5708 + 1e-3, 1.5708  - 1e-3),  # j4
++    (-3.14159 + 1e-3, 3.14159 - 1e-3), # j5
++]
++_GRIP_LO_HI = (0.001, 0.043)  # 1 mm margin from both ends of [0, 0.044]
++ACTION_LO = np.array([lo for lo, _ in _ARM_LO_HI] + [_GRIP_LO_HI[0]] +
++                     [lo for lo, _ in _ARM_LO_HI] + [_GRIP_LO_HI[0]])
++ACTION_HI = np.array([hi for _, hi in _ARM_LO_HI] + [_GRIP_LO_HI[1]] +
++                     [hi for _, hi in _ARM_LO_HI] + [_GRIP_LO_HI[1]])
++
++
+ class TrossenOpenPIBridge:
+     """Bridge between a Trossen AI Stationary Kit and OpenPI policy server."""
+ 
+@@ -49,6 +100,13 @@ class TrossenOpenPIBridge:
+         self.dt = 1.0 / control_frequency
+         self.test_mode = test_mode
+ 
++        # Reset all RealSense devices before connecting. Without this, a run launched
++        # soon after a previous successful run fails: the kernel UVC driver hasn't
++        # released the prior session's USB iso-bandwidth reservations yet, so one
++        # camera ends up starved on the iso schedule and its async_read times out.
++        # hardware_reset() forces every device to renegotiate bandwidth from scratch.
++        _reset_realsense_cameras()
++
+         logger.info(f"Connecting to policy server at {policy_server_host}:{policy_server_port}")
+         self.policy_client = websocket_client_policy.WebsocketClientPolicy(
+             host=policy_server_host, port=policy_server_port
+@@ -61,17 +119,32 @@ class TrossenOpenPIBridge:
              min_time_to_move_multiplier=4.0,
              loop_rate=30,
              cameras={
-+                # This box (coldbrew): cam_high = overhead D455 on the mast,
-+                # cam_low = lower D455 near the base. Confirmed by viewpoint 2026-05-27.
-+                # Wrist cams intentionally omitted: pi05_bimanual_flip_5_objects was
-+                # trained without them (image_mask=False server-side), so opening them
-+                # would add failure points without affecting inference.
++                # coldbrew rig (CORRECTED 2026-05-30 for v3 — pi05_bimanual_rotation):
++                # The training dataset (Bimanual-Recordings) used ALL FOUR D405 cameras
++                # (not the D455s, which I'd mistakenly assigned as cam_high/cam_low until
++                # now). Verified by comparing dataset_top/bottom/wrist reference frames
++                # against live D405 captures -- the matches are unambiguous for top/bottom:
++                #   cam_high (top)    = 130322271752 (D405, overhead view, both grippers visible)
++                #   cam_low  (bottom) = 130322272750 (D405, low close-up of cardboard)
++                #   cam_left_wrist    = 130322271535 (D405 on left gripper)
++                #   cam_right_wrist   = 130322273480 (D405 on right gripper)
++                # All 4 D405s share USB Bus 004 -- 4 active streams on one host controller
++                # are bandwidth-tight, so keeping fps=15 and resolution=480x270 (D405 RGB8
++                # max). Dataset is 480x640 (4:3); we send 480x270 (16:9) -> AlohaInputs
++                # resizes server-side to 224x224 (aspect-ratio mismatch remains a
++                # secondary deployment quirk but is much smaller than the wrong-camera-type
++                # bug we just fixed).
                  "cam_high": RealSenseCameraConfig(
 -                    serial_number_or_name="218622270304", width=640, height=480, fps=30, use_depth=False
-+                    serial_number_or_name="338122302972", width=640, height=480, fps=30, use_depth=False
++                    serial_number_or_name="130322271752", width=480, height=270, fps=5, use_depth=False, warmup_s=10
                  ),
                  "cam_low": RealSenseCameraConfig(
 -                    serial_number_or_name="130322272628", width=640, height=480, fps=30, use_depth=False
 -                ),
 -                "cam_right_wrist": RealSenseCameraConfig(
 -                    serial_number_or_name="128422271347", width=640, height=480, fps=30, use_depth=False
--                ),
--                "cam_left_wrist": RealSenseCameraConfig(
++                    serial_number_or_name="130322272750", width=480, height=270, fps=5, use_depth=False, warmup_s=10
+                 ),
+                 "cam_left_wrist": RealSenseCameraConfig(
 -                    serial_number_or_name="218622274938", width=640, height=480, fps=30, use_depth=False
-+                    serial_number_or_name="333422304645", width=640, height=480, fps=30, use_depth=False
++                    serial_number_or_name="130322271535", width=480, height=270, fps=5, use_depth=False, warmup_s=10
++                ),
++                "cam_right_wrist": RealSenseCameraConfig(
++                    serial_number_or_name="130322273480", width=480, height=270, fps=5, use_depth=False, warmup_s=10
                  ),
              },
          )
-@@ -259,6 +258,14 @@ if __name__ == "__main__":
+@@ -100,6 +173,14 @@ class TrossenOpenPIBridge:
+     def execute_action(self, action: np.ndarray):
+         """Execute action on the arm."""
+         full_action = action.copy()
++        # Defend against floating-point overshoot of hard joint limits (the firmware
++        # rejects any out-of-range command and idles the motor, breaking the control
++        # loop AND the disconnect path -- see dev_log v3 eval crash on grip=0.044022).
++        clamped = np.clip(full_action, ACTION_LO, ACTION_HI)
++        if not np.array_equal(clamped, full_action):
++            n = int(np.sum(clamped != full_action))
++            logger.warning(f"clamped {n}/14 action dims to safe joint range")
++        full_action = clamped
+ 
+         if self.test_mode == "test":
+             logger.info(f"TEST MODE: Would execute action: {full_action}")
+@@ -259,6 +340,14 @@ if __name__ == "__main__":
          max_steps=args.max_steps,
      )
  

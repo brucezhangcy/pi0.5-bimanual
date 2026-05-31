@@ -230,126 +230,57 @@ Uploaded `29999/{params,assets,_CHECKPOINT_METADATA}` (~5.8 GB), `train_state/` 
 
 The GitHub repo's `pi05_config_patch.diff` was also refreshed to include both the v1 and v2 TrainConfig blocks in one patch.
 
-## 5. What to run, step by step
+## 5. Setup (training box and eval desktop)
 
-The steps below were written for **v1** (`pi05_bimanual_flip_5_objects`, 2-camera). Substitute the v2 names where indicated to deploy `pi05_bimanual_flip_4_camera` instead — the recipe is identical, only the config name, exp-name, HF model repo (TBD when v2 finishes and gets uploaded), and dataset id change.
-
-### 5.A On THIS machine (`/data/bruce/pi0.5/openpi` on yunshuang's box)
-
-**v1**: nothing further to run — checkpoint trained, HF upload done, dev_log + config patch pushed to GitHub.
-
-**v2**: training **in progress** at the time of writing (PID 3548308 on GPU 3). Once it finishes, follow the same pattern: upload `29999/{params,assets,_CHECKPOINT_METADATA}` to a new HF model repo (e.g. `BruceZhang0912/pi05-bimanual-flip-4-camera`), and amend the GitHub repo's patch to include the v2 block alongside the v1 block.
-
-Note: the `pi05_bimanual_flip_5_objects` block in `src/openpi/training/config.py` is an **uncommitted local edit** on the `trossen-ai` branch. That's fine — we don't push it back to the TrossenRobotics fork. The diff is preserved as:
-
-- GitHub repo `brucezhangcy/pi0.5-bimanual` → `pi05_config_patch.diff`
-- Local: regenerate any time with `git diff src/openpi/training/config.py`
-
-If you ever want to retrain on this box, the existing setup still works:
+### 5.A Training-box retrain template
+Pattern (substitute config / exp-name for any of the three variants):
 
 ```bash
 cd /data/bruce/pi0.5/openpi
 CUDA_VISIBLE_DEVICES=3 XLA_PYTHON_CLIENT_MEM_FRACTION=0.85 \
-    uv run scripts/train.py pi05_bimanual_flip_5_objects \
-        --exp-name=pi05_bimanual_flip_5_objects_v2 \
-        --overwrite
+    uv run scripts/train.py <config_name> --exp-name=<exp_name> --overwrite
 ```
 
-### 5.B On the eval desktop (the box wired to the real Trossen arms)
+Each `pi05_bimanual_*` block in `src/openpi/training/config.py` is an uncommitted local edit on the TrossenRobotics `trossen-ai` branch, preserved as `pi05_config_patch.diff` in this repo (now contains all 3 blocks). Re-generate any time with `git diff src/openpi/training/config.py`.
 
-Two things live in two different places:
+### 5.B Eval-desktop layout and one-time setup
 
-- **GitHub** (`brucezhangcy/pi0.5-bimanual`, private): this dev_log + the openpi config patch. Small text files. Will also hold future task variants (rotation, etc.).
-- **Hugging Face** (`BruceZhang0912/pi05-bimanual-flip-5-objects`, private): the 5.8 GB trained checkpoint.
-
-**Layout on the eval desktop.** Everything is consolidated under the cloned instructions repo so there's a single self-contained project folder (this is how the eval box is actually set up — `coldbrew`, RTX 4090):
+This repo (instructions + patches), the `openpi/` clone, and the `openpi_checkpoints/` download all live consolidated under one folder on the eval desktop:
 
 ```
-$HOME/pi0.5-bimanual/                       # the GitHub instructions repo (this dir)
-├── dev_log.md  pi05_config_patch.diff  README.md
+$HOME/pi0.5-bimanual/                       # this GitHub repo
+├── dev_log.md  pi05_config_patch.diff  trossen_ai_client_patch.diff  README.md
+├── eval_tools/                             # sim playback, replay overlay, etc.
 ├── openpi/                                 # TrossenRobotics/openpi clone (gitignored)
-└── openpi_checkpoints/                     # HF checkpoint download (gitignored)
-    └── pi05_bimanual_flip_5_objects/pi05_bimanual_flip_5_objects_v1/29999/
+└── openpi_checkpoints/                     # HF checkpoint downloads (gitignored)
 ```
 
-`openpi/` and `openpi_checkpoints/` are listed in `.gitignore` so they never get committed back into the instructions repo. The dataset is **not** required on the eval box (eval runs from the checkpoint + base Trossen norm stats); it lives only on the training box.
-
-Six steps, in order:
-
-**Step 1 — Clone the instructions repo from GitHub** (gives you this dev_log + the config patch).
+The dataset is **not** required on the eval box for inference — eval runs from the checkpoint + the base Trossen norm stats. (It IS needed for the replay-overlay diagnostic, which downloads one episode on demand — see §10.7.)
 
 ```bash
-git clone https://github.com/brucezhangcy/pi0.5-bimanual.git
-cd pi0.5-bimanual
-ls   # dev_log.md  pi05_config_patch.diff  README.md
-```
+# 1. Clone this repo and cd in
+git clone https://github.com/brucezhangcy/pi0.5-bimanual.git && cd pi0.5-bimanual
 
-**Step 2 — Clone openpi** (into the instructions repo so everything stays under one folder).
-
-```bash
-# from inside $HOME/pi0.5-bimanual (where Step 1 left you)
+# 2. Clone openpi inside it
 git clone --recurse-submodules https://github.com/TrossenRobotics/openpi.git
-cd openpi
-git checkout trossen-ai          # same branch we trained on
+cd openpi && git checkout trossen-ai
 git submodule update --init --recursive
 GIT_LFS_SKIP_SMUDGE=1 uv sync
 GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+
+# 3. Apply both patches (configs + client edits)
+git apply ../pi05_config_patch.diff                                    # adds all 3 TrainConfig blocks
+git apply ../trossen_ai_client_patch.diff                              # client camera config, action clamp, Ctrl+C-home, auto-reset
+
+# 4. Pull the checkpoint(s) you want from HF (substitute the variant; ~5.8 GB each)
+HF_TOKEN=<read-token> uv run huggingface-cli download \
+    BruceZhang0912/pi05-bimanual-rotation \
+    --local-dir $HOME/pi0.5-bimanual/openpi_checkpoints/pi05_bimanual_rotation/pi05_bimanual_rotation_v1
 ```
 
-**Step 3 — Apply the config patch** (without this, `serve_policy.py` doesn't know how to wrap the weights).
+After step 4 each variant's checkpoint directory contains `29999/{params, assets/trossen, _CHECKPOINT_METADATA}`.
 
-```bash
-# still in $HOME/pi0.5-bimanual/openpi (the patch is one level up)
-git apply ../pi05_config_patch.diff
-grep -n "pi05_bimanual_flip_5_objects" src/openpi/training/config.py    # confirm the block is in
-```
-
-**Step 4 — Pull the checkpoint from HF** (~5.8 GB).
-
-```bash
-# huggingface-cli ships in openpi's uv env; run it from $HOME/pi0.5-bimanual/openpi
-HF_TOKEN=<your HF read token> \
-    uv run huggingface-cli download BruceZhang0912/pi05-bimanual-flip-5-objects \
-        --local-dir $HOME/pi0.5-bimanual/openpi_checkpoints/pi05_bimanual_flip_5_objects/pi05_bimanual_flip_5_objects_v1
-```
-
-(The `--local-dir-use-symlinks` flag was removed in current `huggingface_hub` — omit it; the CLI already copies real files into `--local-dir`.)
-
-After this the directory should look like:
-```
-$HOME/pi0.5-bimanual/openpi_checkpoints/pi05_bimanual_flip_5_objects/pi05_bimanual_flip_5_objects_v1/29999/
-    ├── params/
-    ├── assets/trossen/
-    └── _CHECKPOINT_METADATA
-```
-
-**Step 5 — Start the policy server.**
-
-```bash
-cd $HOME/pi0.5-bimanual/openpi
-uv run scripts/serve_policy.py \
-    policy:checkpoint \
-    --policy.config=pi05_bimanual_flip_5_objects \
-    --policy.dir=$HOME/pi0.5-bimanual/openpi_checkpoints/pi05_bimanual_flip_5_objects/pi05_bimanual_flip_5_objects_v1/29999
-```
-
-Defaults to a websocket server on port 8000. First inference call JIT-compiles for 1–2 min — fire a dummy request before letting the robot move.
-
-**Step 6 — Run the Trossen client against the live arms.**
-
-Follow the **Real-Robot Evaluation** section of https://docs.trossenrobotics.com/trossen_arm/v1.8/tutorials/openpi.html. The client must:
-
-- Send `observation.images.cam_high` and `observation.images.cam_low` images each control tick.
-- **Not** send wrist-camera images — model was trained without them; `image_mask` for those slots is `False` and real wrist images would be ignored.
-- Send the 14-dim joint state in order `left_joint_0..6, right_joint_0..6`.
-- Send `prompt="Bimanual Flip"` (same string as `meta/tasks.jsonl`).
-- Run at ~30 Hz (the dataset fps); execute the returned action chunk and only re-query the policy once per chunk.
-
-### 5.C Sanity checks before touching the robot
-
-1. **Dry run — ✅ DONE on `coldbrew` 2026-05-26.** Sent a dummy observation (zero 14-dim state + random `cam_high`/`cam_low` images @224 CHW + `prompt="Bimanual Flip"`) through the websocket client. Output action chunk is `(50, 14)` with joint magnitudes in a sane radian range (global abs max ≈ 0.65, no NaNs/blowups). Confirms repack → norm-stats → pi0.5 → action-decode works end-to-end. Values aren't behaviorally meaningful (random images) — that's what #2 is for. Script: `/tmp/dryrun_infer.py`.
-2. **Replay overlay** — feed the first frame of a real training episode and see whether the predicted action chunk roughly matches the recorded action. Wildly off → camera mapping or joint ordering is wrong. **Needs the dataset**, which is not on the eval box; copy a few episodes from the training box (`/data/bruce/pi0.5/bimanual_flip_5_objects`) under `$HOME/pi0.5-bimanual/datasets/` to run this.
-3. **Slow first physical run** — clamp action rate / scale to ~50 % until you see the policy execute one full flip without surprises. Then ramp up.
+To **run** the eval, see the runbook in **§10.8** (current pipeline, all fixes applied).
 
 ## 6. Gotchas observed
 
@@ -371,53 +302,6 @@ Follow the **Real-Robot Evaluation** section of https://docs.trossenrobotics.com
 | HF repo (private, weights) | https://huggingface.co/BruceZhang0912/pi05-bimanual-flip-5-objects |
 | GitHub repo (private, instructions + patch) | https://github.com/brucezhangcy/pi0.5-bimanual |
 | Dataset symlink | `~/.cache/huggingface/lerobot/bruce/bimanual_flip_5_objects` → `/data/bruce/pi0.5/bimanual_flip_5_objects` |
-
-## 8. Eval-desktop session — `coldbrew` (RTX 4090), 2026-05-27
-
-Brought the trained checkpoint up on the eval desktop wired to the real Trossen arms and ran the first real-robot eval. **Outcome: the policy did not succeed at the flip task (see 8.6).**
-
-### 8.1 Setup (done)
-- Cloned `TrossenRobotics/openpi` (branch `trossen-ai`), `uv sync` + `uv pip install -e .`, applied `pi05_config_patch.diff`. Pulled the 5.8 GB checkpoint from HF into `29999/`.
-- **Consolidated layout**: everything lives under `$HOME/pi0.5-bimanual/` — the instructions repo, plus `openpi/` and `openpi_checkpoints/` (both gitignored). Moving `openpi/` breaks its uv venv (absolute paths) → re-ran `uv sync` after the move. §4.B commands updated to these paths.
-- Policy server: `serve_policy.py policy:checkpoint --policy.config=pi05_bimanual_flip_5_objects` on `:8000`. Dry-run (§4.C #1) passed: `(50,14)`, sane magnitudes.
-
-### 8.2 Camera mapping
-- This rig has 2× RealSense **D455** scene cams + 4× **D405** (wrist, unused). `cam_high=338122302972`, `cam_low=333422304645`.
-- **Caveat:** both D455s are at the **same physical height** — the high/low assignment was confirmed only by *viewpoint appearance*, NOT by matching against a real training frame. `cam_high`/`cam_low` are dataset *channel names*, not heights; a swap feeds the policy OOD images. This is unverified ground-truth and a prime suspect for 8.6. See `eval_tools/replay_overlay.py`.
-
-### 8.3 Driver/firmware fix (gotcha)
-- `main.py`'s arm `connect()` failed: **driver v1.9.0 vs controller firmware v1.10.0** ("major and minor versions must match"). The client env resolved `trossen-arm==1.9.0` (lerobot_trossen only pins `>=1.9.0`), and `uv run` auto-syncs so a manual `uv pip install` got reverted. **Fix: pinned `trossen-arm==1.10.0` in `examples/trossen_ai/pyproject.toml`.**
-
-### 8.4 Client edits (preserved as `trossen_ai_client_patch.diff`)
-The `openpi/` tree is gitignored, so client edits are saved as a patch in this repo:
-- Set the two camera serials, dropped the wrist-cam entries.
-- Pinned `trossen-arm==1.10.0`.
-- Wrapped the run loop in `try/finally` so **Ctrl+C also returns the arms to rest** (`cleanup()`→`disconnect()` drives both arms to staged then sleep/zero, ~4 s/arm).
-
-### 8.5 Test mode (`--mode test`) — passed
-Full real pipeline verified: both arms connected (driver==firmware==1.10.0), both cameras connected, policy queried → `(50,14)`, logged would-be actions are smooth and within joint ranges. **Note:** test mode does NOT execute the per-step actions, but `disconnect()` on exit DOES move both arms to the rest pose (~4 s/arm) — i.e. test mode is not entirely motion-free at shutdown.
-
-### 8.6 Real eval (`--mode autonomous`) — NO SUCCESS
-Ran the policy on the live arms. **It did not complete the bimanual flip.** (Detailed failure behavior not yet logged here — TODO: fill in what the arms actually did: reached wrong spot / failed to grasp / erratic / froze, etc.)
-
-Leading hypotheses, roughly in priority order:
-1. **Camera mapping unverified against training data** (8.2) — top suspect. Run `eval_tools/replay_overlay.py` on a real episode: if predicted≈recorded actions, mapping+pipeline are right; if all dims are off with cameras looking fine, cam_high/cam_low are likely swapped.
-2. **Scene/distribution mismatch** — pi0.5 here is a narrow LoRA finetune (100 eps, 1 task, controlled scene). Object choice, positions, lighting, and camera *poses* must closely match data collection. "Same setup" was asserted but not validated against training frames.
-3. **No success/termination logic** — the client runs a fixed `--max_steps` (default 1000 ≈ 33 s @ 30 Hz) with no task-success detection; it keeps acting regardless. Not a failure cause, but shapes what "no success" looks like.
-
-**Recommended next step:** copy a few episodes from the training box and run the **Tier-1 replay overlay** before the next hardware attempt — it disambiguates camera-mapping vs. policy-quality without risking the arms.
-
-### 8.7 Safety tooling added (`eval_tools/`)
-Safety ladder + scripts (see `eval_tools/README.md`): `capture_action_chunk.py`, `sim_playback.py` (Tier-2 MuJoCo limit/velocity check + mp4, runs in the `trossen_sim` conda env), `replay_overlay.py` (Tier-1, needs dataset), `make_demo_trajectory.py`. Physical e-stop for this rig is **not** a documented dedicated button — confirm the bench's power-kill/e-stop; comm-loss and collision auto-idle are the documented software safeties.
-
-### 8.8 New artifacts
-| Artifact | Location |
-|---|---|
-| Eval-desktop openpi clone (gitignored) | `$HOME/pi0.5-bimanual/openpi/` (branch `trossen-ai` + patches) |
-| Checkpoint (gitignored) | `$HOME/pi0.5-bimanual/openpi_checkpoints/pi05_bimanual_flip_5_objects/pi05_bimanual_flip_5_objects_v1/29999/` |
-| Client edits patch | `trossen_ai_client_patch.diff` (apply in `openpi/`) |
-| Safety/eval tooling | `eval_tools/` |
-| Test-mode log | `/tmp/client_test.log` |
 
 ## 9. Run v3 — `Bimanual-Recordings` (rotation, 4 cameras), 2026-05-28
 
@@ -502,3 +386,202 @@ Repo: `BruceZhang0912/pi05-bimanual-rotation` (private)
 Uploaded `29999/{params,assets,_CHECKPOINT_METADATA}` (~5.8 GB), `train_state/` excluded. Same `HfApi.upload_folder` recipe as v1 / v2.
 
 GitHub repo's `pi05_config_patch.diff` now contains all three TrainConfig blocks (`pi05_bimanual_flip_5_objects`, `pi05_bimanual_flip_4_camera`, `pi05_bimanual_rotation`).
+
+## 10. Eval-desktop session — v3 (rotation) on `coldbrew`, 2026-05-30
+
+Brought the v3 (rotation) checkpoint up on the real arms. Surfaced multiple new deployment issues, the biggest of which **retroactively explains why §8 (v1 eval) didn't work either**: I had the wrong physical camera type assigned to `cam_high`/`cam_low` all along. After fixing that and a stack of supporting patches, the full pipeline runs end-to-end with auto-recovery between attempts. **Note:** §5 (the runbook) and §8.2 (the v1 camera-mapping conclusion) are now superseded by §10.2 and §10.8 below — use those.
+
+### 10.1 Setup
+- Pulled latest instructions repo (HEAD `4f88d95` at session start).
+- Re-applied the refreshed `pi05_config_patch.diff` (now 3 TrainConfig blocks: v1 / v2 / v3).
+- Pulled the v3 checkpoint (`BruceZhang0912/pi05-bimanual-rotation`, ~5.8 GB) into `$HOME/pi0.5-bimanual/openpi_checkpoints/pi05_bimanual_rotation/pi05_bimanual_rotation_v1/29999/{params, assets/trossen, _CHECKPOINT_METADATA}`.
+- Started server: `serve_policy.py policy:checkpoint --policy.config=pi05_bimanual_rotation` on `:8000`. Dummy 4-camera dry-run passed: `(50, 14)`, sane magnitudes.
+
+### 10.2 Camera mapping — **the big bug that ate v1 too**
+
+**v3 dataset uses ALL FOUR D405s** (`top`, `bottom`, `left_wrist`, `right_wrist`); the two D455s on this rig are **not policy inputs**. In §8.2 I'd assigned the D455s as `cam_high`/`cam_low` — that was wrong then too, but the v1 dataset only used 2 cameras so the error was less visible.
+
+Verified by downloading one v3 episode from HF and extracting a reference frame from each dataset channel (`artifacts/dataset_{top,bottom,left_wrist,right_wrist}.png`), then matching against live captures from each D405 (`artifacts/d405_<serial>.png`):
+
+| Server channel | Dataset key | Live D405 serial | What the frame shows |
+|---|---|---|---|
+| `cam_high` | `observation.images.top` | `130322271752` | overhead view, both grippers + box visible |
+| `cam_low` | `observation.images.bottom` | `130322272750` | low close-up of the cardboard box |
+| `cam_left_wrist` | `observation.images.left_wrist` | `130322271535` | forward over table, gripper-V in foreground |
+| `cam_right_wrist` | `observation.images.right_wrist` | `130322273480` | forward over table, gripper-V in foreground, box more to LEFT |
+
+Prior to this fix, the policy was being fed wide-FOV **D455** views in the `cam_high`/`cam_low` slots where it was trained on narrow **D405** views. Total OOD perception — almost certainly the dominant cause of all "no rotation tendency / random reaching" behavior seen in both v1 (§8.6) and the early v3 attempts.
+
+**Rule (recorded in memory):** `cam_high`/`cam_low` are *dataset channel names*, not physical heights or camera types — always verify by comparing a real training frame to a live camera capture, never guess from appearance/mounting.
+
+### 10.3 USB-bandwidth gotcha — 4 D405s on one host controller
+
+All 4 D405s enumerate on **USB Bus 004** (single host controller). With 4 active streams, iso scheduling starves at least one camera intermittently:
+
+```
+WARNING - Error reading frame in background thread for RealSenseCamera(<serial>): read failed (status=False)
+TimeoutError: Timed out waiting for frame from camera RealSenseCamera(<serial>) after <N>ms.
+```
+
+Patches applied **in the client venv** (`examples/trossen_ai/.venv/lib/python3.11/site-packages/lerobot/cameras/realsense/camera_realsense.py` — **these are lost on a fresh `uv sync` and must be re-applied**):
+
+- warmup pre-read sleep `1 s → 3 s`
+- warmup-loop read timeout `200 ms → 3000 ms`, wrapped in `try/except RuntimeError: pass` so transient first-read failures don't kill `connect`
+- `async_read` default timeout `200 ms → 2000 ms` so stale frames during running stall the loop (briefly drop control rate) instead of crashing it
+
+Camera config (in `main.py`): all 4 D405s at `480×270 RGB8 @ 5 fps`, `warmup_s=10`. Dataset is 480×640 (4:3); we send 480×270 (16:9) — AlohaInputs resizes server-side to 224×224 so functionally OK but a 4:3↔16:9 aspect stretch remains (D405 RGB8 maxes out at 480×270; 640×480 is YUYV-only and `lerobot.cameras.realsense` hard-codes `rs.format.rgb8`).
+
+**Real (un-fixed) bottleneck:** move at least one D405 to a USB port on a different host controller (not Bus 004). Then iso bandwidth is split across 2 host controllers and contention vanishes. Until that's done, fps is the only knob.
+
+### 10.4 The "alternating success / fail" pattern and the auto-reset fix
+
+Without intervention: a successful run is reliably followed by a failed run. Cause: the kernel UVC driver doesn't immediately release USB iso-bandwidth reservations when a stream ends, so the next launch starts with a fragmented schedule and one camera is starved. `hardware_reset()` forces each device to renegotiate from scratch.
+
+Wired `_reset_realsense_cameras()` into the start of `TrossenOpenPIBridge.__init__()` — every `main.py` launch now hardware-resets first (~8 s startup hit), so every attempt begins with a clean iso schedule. No manual reset between runs.
+
+### 10.5 Gripper firmware-limit crash and the action clamp
+
+First end-to-end policy run ran ~10 s of motion then crashed with:
+```
+Joint 6 position limit exceeded: expected [-0.004, 0.044], motor reported 0.044022. Setting to idle.
+```
+22 μm of floating-point overshoot of the gripper's hard 0.044 m limit → firmware idles the joint → TCP broken pipe → `disconnect()` cleanup ALSO fails (it tries to drive the same out-of-range gripper). Result: arm stuck torque-on with gripper physically at 0.044042, and the only recovery is **physically** nudging the gripper carriage back inside `[0, 0.044]` (power-cycle alone doesn't help — controller re-reads the same encoder value and idles again).
+
+**Fix:** added module-level `ACTION_LO`/`ACTION_HI` from the URDF actuator `ctrlrange` (1 mrad margin on arm joints, 1 mm margin on grippers → `[0.001, 0.043]`); `execute_action()` clamps every action through `np.clip` and logs a warning when any dim is clipped.
+
+### 10.6 Graceful Ctrl+C → home
+
+Wrapped `bridge.autonomous_mode()` in `try/except KeyboardInterrupt / finally: bridge.cleanup()` so Ctrl+C (and any unhandled exception) runs the library's `disconnect()` routine, which smoothly drives both arms to staged then sleep/zero (~4 s/arm). Caveat: this is a **controlled motion**, not an instant freeze — for real emergencies (collision imminent) use the **physical e-stop**, not Ctrl+C. No documented hardware e-stop button exists on the WidowX AI per Trossen docs; the bench's power-kill is the de-facto physical stop.
+
+### 10.7 Replay-overlay verdict: deployment vs. policy
+
+Ran `eval_tools/replay_overlay.py --config pi05_bimanual_rotation --episode 0 --frames 0,50,150` against the running server **before** the camera fix:
+
+| frame | first-action MAE | chunk-mean MAE |
+|---|---|---|
+| 0 | 0.050 | 0.106 |
+| 50 | 0.029 | 0.073 |
+| 150 | 0.046 | 0.046 |
+
+Worst dims (avg): **L_j3 (0.16) · R_j3 (0.15) · L_j2 (0.13)** — both **wrist-pitch** joints + an elbow. Wrist pitch is the most camera-dependent dim and was hit hardest, exactly matching the (then-active) D455-in-D405-slot bug. Improving-with-time MAE pattern (0.106 → 0.046) also fits "initial perception is off, policy stabilizes once moving." Conclusion: **mostly deployment** (primarily the camera mis-assignment from §10.2), with some narrow-finetune contribution from 100-episode LoRA.
+
+⚠️ The overlay can NOT detect physical-to-channel-name swaps (it reads from the dataset, never from physical cameras). For that, use the dataset-vs-live frame matching method in §10.2.
+
+### 10.8 Deployment pipeline — operator runbook (current, all fixes applied)
+
+This supersedes §5.B for v3 deployment.
+
+```bash
+# 1. Server (once per machine session; ~30 s to load)
+cd $HOME/pi0.5-bimanual/openpi
+uv run scripts/serve_policy.py policy:checkpoint \
+    --policy.config=pi05_bimanual_rotation \
+    --policy.dir=$HOME/pi0.5-bimanual/openpi_checkpoints/pi05_bimanual_rotation/pi05_bimanual_rotation_v1/29999
+
+# 2. (offline, optional) replay-overlay sanity check — disambiguates deployment vs policy
+HF_TOKEN=<read-token> uv run python ../eval_tools/replay_overlay.py \
+    --config pi05_bimanual_rotation --episode 0 --frames 0,50,150
+
+# 3. Place the box on the table in the trained layout. Confirm both arms powered, arm IPs
+#    192.168.1.5 (left) / 192.168.1.4 (right) reachable, the four D405s plugged in
+#    (D455s irrelevant for the policy).
+
+# 4. (optional) Test mode — no policy-driven motion, but the disconnect at exit DOES move
+#    both arms to rest pose (~4 s/arm). Useful for one full pipeline check on real frames.
+cd examples/trossen_ai
+uv run main.py --mode test --task_prompt "Bimanual Rotate" --max_steps 60
+
+# 5. Autonomous — keep --max_steps small the first time (300 ≈ 10 s of policy motion).
+uv run main.py --mode autonomous --task_prompt "Bimanual Rotate" --max_steps 300
+```
+
+What `main.py` does at every launch (all baked in via `trossen_ai_client_patch.diff`):
+- Hardware-resets all RealSense devices (~8 s) → clean USB iso schedule
+- Connects left arm → right arm → all 4 cameras (driver `v1.10.0` matches firmware `v1.10.0`)
+- Runs the 30 Hz control loop, requesting a 50-step action chunk every 50 steps
+- **Clamps every action** to safe joint ranges before sending
+- On Ctrl+C / exception / normal finish → `cleanup()` → `disconnect()` → both arms smoothly home to staged then sleep/zero
+
+**Stopping the run:**
+- Ctrl+C → smooth return-to-rest (~4 s/arm). Orderly stop only.
+- Bench physical e-stop / power-kill → immediate freeze. Use for real emergencies.
+
+**Known recovery patterns:**
+- Cameras report `Device or resource busy`: another process (often yunshuang's `visualize_live.py`) has them open. `sudo kill <PID>`, then retry.
+- One D405 still flakes after auto-reset: drop fps lower in `main.py` (already at 5), or — the real fix — move one D405 to a different USB host controller.
+- Gripper-limit firmware idle (left arm `0.044+` encoder reading): physically nudge the gripper carriage back into `[0, 0.044]`, then re-home.
+
+### 10.9 Outcomes
+- Pipeline confirmed working end-to-end (one no-box run + one ~10 s policy run on the box that crashed at the gripper limit — fixed since).
+- With the camera-type fix (§10.2) + all the auxiliary patches, the next autonomous attempt is the **first** that's actually receiving the correct camera distribution; whether it succeeds at the task is now genuinely a test of policy quality on this rig (which the replay overlay suggested could improve a lot).
+- **§5 / §8 are deprecated for v3 deployment — follow §10 instead.**
+
+### 10.10 Artifacts (new / updated)
+| Artifact | Location | Notes |
+|---|---|---|
+| Client edits patch | `trossen_ai_client_patch.diff` (root) | camera mapping (4× D405), driver pin, action clamp, Ctrl+C-home, auto-reset; apply in `openpi/` |
+| Replay-overlay script | `eval_tools/replay_overlay.py` | now multi-config (v1 / v2 / v3 presets); needs HF token + matching server |
+| Dataset reference frames | `artifacts/dataset_{top,bottom,left_wrist,right_wrist}.png` | gold for verifying camera mapping |
+| Live D405 captures | `artifacts/d405_<serial>.png` | matched 1:1 against dataset frames |
+| Lerobot venv patches | `openpi/examples/trossen_ai/.venv/.../camera_realsense.py` | **not in any patch file — lost on `uv sync`** |
+| Replay overlay log | `/tmp/replay_overlay_v3.log` | the run that diagnosed deployment vs policy |
+
+## 11. Eval-desktop session — v2 (flip, 4 cameras) on `coldbrew`, 2026-05-30
+
+Brought up the v2 (flip-4-camera) checkpoint **in parallel with v3** — same client, same camera mapping, same patches, only the policy server config differs. v3 stays one `pkill` + relaunch away, no client changes ever needed.
+
+### 11.1 Why v2 needs zero client changes
+v2 (`pi05_bimanual_flip_4_camera`) and v3 (`pi05_bimanual_rotation`) **share the exact same dataset schema**: 4 cameras (`top` / `bottom` / `left_wrist` / `right_wrist`), 14-dim bimanual joints @ 30 Hz, single task per dataset. So everything in §10 (camera mapping, action clamp, USB-bandwidth patches, auto-reset, Ctrl+C-home) applies unchanged. The only per-policy differences are **server-side**:
+
+| Thing that changes | v2 (flip) | v3 (rotation) |
+|---|---|---|
+| `--policy.config` | `pi05_bimanual_flip_4_camera` | `pi05_bimanual_rotation` |
+| `--policy.dir` | `…/pi05_bimanual_flip_4_camera/pi05_bimanual_flip_4_camera_v1/29999` | `…/pi05_bimanual_rotation/pi05_bimanual_rotation_v1/29999` |
+| `--task_prompt` (client) | `"Bimanual Flip"` | `"Bimanual Rotate"` |
+
+### 11.2 Setup
+- Pulled v2 checkpoint from HF (`BruceZhang0912/pi05-bimanual-flip-4-camera`, ~5.8 GB) into `$HOME/pi0.5-bimanual/openpi_checkpoints/pi05_bimanual_flip_4_camera/pi05_bimanual_flip_4_camera_v1/29999/{params, assets/trossen, _CHECKPOINT_METADATA}`.
+- Stopped the v3 server (`pkill -f serve_policy.py`), started v2 server with `--policy.config=pi05_bimanual_flip_4_camera` on the same `:8000`. Both norm stats loaded; ready.
+
+### 11.3 Runbook — v2 flip
+```bash
+# (one-time per machine session) start the v2 server
+cd $HOME/pi0.5-bimanual/openpi
+uv run scripts/serve_policy.py policy:checkpoint \
+    --policy.config=pi05_bimanual_flip_4_camera \
+    --policy.dir=$HOME/pi0.5-bimanual/openpi_checkpoints/pi05_bimanual_flip_4_camera/pi05_bimanual_flip_4_camera_v1/29999
+
+# place flip object(s) in trained layout, then:
+cd examples/trossen_ai
+uv run main.py --mode autonomous --task_prompt "Bimanual Flip" --max_steps 300
+```
+
+### 11.4 Switching between v2 (flip) and v3 (rotation)
+Only the server swaps; `main.py` is untouched.
+
+```bash
+# v2 (flip)  -> v3 (rotation)
+pkill -f serve_policy.py
+cd $HOME/pi0.5-bimanual/openpi
+uv run scripts/serve_policy.py policy:checkpoint \
+    --policy.config=pi05_bimanual_rotation \
+    --policy.dir=$HOME/pi0.5-bimanual/openpi_checkpoints/pi05_bimanual_rotation/pi05_bimanual_rotation_v1/29999
+# then client: uv run main.py --mode autonomous --task_prompt "Bimanual Rotate" --max_steps 300
+
+# v3 (rotation) -> v2 (flip)
+pkill -f serve_policy.py
+cd $HOME/pi0.5-bimanual/openpi
+uv run scripts/serve_policy.py policy:checkpoint \
+    --policy.config=pi05_bimanual_flip_4_camera \
+    --policy.dir=$HOME/pi0.5-bimanual/openpi_checkpoints/pi05_bimanual_flip_4_camera/pi05_bimanual_flip_4_camera_v1/29999
+# then client: uv run main.py --mode autonomous --task_prompt "Bimanual Flip" --max_steps 300
+```
+
+Server load takes ~30 s + a ~1–2 min JIT on the first inference call after each swap. If you'd rather run both servers concurrently (instant switch, no JIT penalty), launch them on different ports with `--port 8000` / `--port 8001` and `XLA_PYTHON_CLIENT_MEM_FRACTION=0.4` per server to fit both on the RTX 4090 (24 GB); then point the client at the right one with `--policy_port`. Not done currently — single-server-at-a-time is the simpler path.
+
+### 11.5 Artifacts (v2-specific only — everything else is shared with §10)
+| Artifact | Location |
+|---|---|
+| v2 checkpoint (gitignored) | `$HOME/pi0.5-bimanual/openpi_checkpoints/pi05_bimanual_flip_4_camera/pi05_bimanual_flip_4_camera_v1/29999/` |
+| v2 HF repo (private) | https://huggingface.co/BruceZhang0912/pi05-bimanual-flip-4-camera |
+| v2 dataset on HF (private) | https://huggingface.co/datasets/BruceZhang0912/Bimanual-Flip-4-Camera |
