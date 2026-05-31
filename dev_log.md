@@ -585,3 +585,45 @@ Server load takes ~30 s + a ~1–2 min JIT on the first inference call after eac
 | v2 checkpoint (gitignored) | `$HOME/pi0.5-bimanual/openpi_checkpoints/pi05_bimanual_flip_4_camera/pi05_bimanual_flip_4_camera_v1/29999/` |
 | v2 HF repo (private) | https://huggingface.co/BruceZhang0912/pi05-bimanual-flip-4-camera |
 | v2 dataset on HF (private) | https://huggingface.co/datasets/BruceZhang0912/Bimanual-Flip-4-Camera |
+
+## 12. Real-arm eval results — both policies fail to generalize, 2026-05-31
+
+Headline: **0/15 success on every box, on both v2 (flip) and v3 (rotation).** The full deployment pipeline from §10 and §11 was in place — correct 4× D405 camera mapping verified against training frames (§10.2), action clamp (§10.5), auto camera reset, Ctrl+C-home, driver/firmware match. No crashes, no premature termination; the arms moved smoothly through trained-looking trajectories every trial. They simply did not complete the task.
+
+### 12.1 Protocol
+- **v2 (`pi05_bimanual_flip_4_camera`)**: each box variant flipped 15 times → **0/15** success on each.
+- **v3 (`pi05_bimanual_rotation`)**: each box variant rotated 15 times → **0/15** success on each.
+- Client: `uv run main.py --mode autonomous --task_prompt "<Bimanual Flip|Rotate>" --max_steps 300/400` (~10–13 s of policy motion per trial). Server config / prompt swapped per §11.4. Same arms, same camera mount positions, scene set to match the training layout.
+
+### 12.2 What this means now that deployment is mostly fixed
+
+The §10.7 replay overlay had identified deployment (specifically the D455-vs-D405 camera-type bug in `cam_high`/`cam_low`) as the dominant cause of the §8/§10 v1 failures. After fixing that and the rest of the §10 patch stack, **0/15 across both policies on the real arms** says the remaining failure is no longer dominated by deployment — it sits with policy generalization on this rig.
+
+Suspected dominant factors, in priority order:
+
+1. **Narrow training distribution.** Each policy is a LoRA finetune on ~100 episodes of one task, one platform, one controlled scene. Trossen's own openpi notes warn that small datasets generalize poorly to changes in object color/shape/lighting/exact camera pose. Even after the camera fix, residual differences (lighting, exact mount angles, lens calibration drift between training cameras and our serials) are still distribution shift.
+2. **Camera resolution / fps still mismatched.** Dataset frames stored at 480×640 (4:3) @ 30 fps; deployment runs at 480×270 (16:9) @ 5 fps because (a) D405 RGB8 maxes out at 480×270 and (b) all four D405s share USB Bus 004 → bandwidth contention forces 5 fps. AlohaInputs resizes to 224×224 either way, but the 4:3↔16:9 aspect stretch and 6× lower frame rate are real shifts.
+3. **No success / termination logic.** The client runs a fixed `--max_steps` with no task-success detection — it keeps acting regardless of state. Doesn't cause failure, but means "success" requires the entire trained behavior to fire in the right window.
+
+Things that are NOT likely to be the cause (verified):
+- Channel-name swap (cam_left_wrist ↔ cam_right_wrist): replay-overlay error pattern in §10.7 was not symmetric in a way that swap would produce, and the swap-experiment didn't move MAE in the expected direction.
+- Joint-order bug: replay MAE was distributed across joints, not concentrated on one.
+- Driver/firmware: matched (v1.10.0 both sides), no errors during the runs.
+- Camera channel-to-camera-type assignment: verified by dataset-vs-live frame matching in §10.2.
+
+### 12.3 Recommended next investigations
+
+In rough order of cost:
+
+1. **Re-run replay overlay with the corrected camera mapping** (now that §10.2 is fixed). The pre-fix MAE numbers in §10.7 reflected the wrong cameras feeding the policy. A fresh run should show how much MAE the policy currently has on real-frame inputs; if MAE is now small (<0.03 chunk-mean), the policy IS reproducing demonstrations on dataset frames and the gap to hardware is environmental/lens, not the model. If MAE is still ≥ ~0.05, the policy's near-training-MAE floor is the bottleneck and more data is the answer.
+2. **Run with the exact same physical object used during data collection** if not already, before concluding generalization fails. Color/material shifts matter for these narrow finetunes.
+3. **Increase camera fps** — splitting wrist D405s onto a USB bus that isn't Bus 004 lets us run all four at 30 fps. Probably moderate.
+4. **More training data**. Either more episodes per task, or a wider scene/object distribution, or both. Probably the biggest lever long-term.
+5. **Consider unfreezing more of the pi0.5 backbone** — current configs LoRA-tune PaliGemma + the 300M action expert; broadening that may help, at training-cost.
+
+### 12.4 What's confirmed working (so this section doesn't get misread)
+- End-to-end client/server pipeline: cameras stream, policy queried at 30 Hz (limited by 5 fps wrist), 50-step action chunks decoded and executed; both arms move smoothly.
+- Safety: action clamp prevents the gripper-limit firmware crash from §10.5 from recurring; Ctrl+C and unhandled exceptions both route arms back to the rest pose; auto camera reset eliminates the alternating success/fail launch pattern from §10.4.
+- Switching policies: server-only restart per §11.4 works as documented; client unchanged.
+
+The infrastructure is solid; the **policy quality on this rig** is the open problem.
